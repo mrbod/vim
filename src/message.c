@@ -609,11 +609,9 @@ emsg(char_u *s)
 
     called_emsg = TRUE;
 
-    /*
-     * If "emsg_severe" is TRUE: When an error exception is to be thrown,
-     * prefer this message over previous messages for the same command.
-     */
 #ifdef FEAT_EVAL
+    /* If "emsg_severe" is TRUE: When an error exception is to be thrown,
+     * prefer this message over previous messages for the same command. */
     severe = emsg_severe;
     emsg_severe = FALSE;
 #endif
@@ -684,6 +682,9 @@ emsg(char_u *s)
 	else
 	    flush_buffers(FALSE);	/* flush internal buffers */
 	did_emsg = TRUE;		/* flag for DoOneCmd() */
+#ifdef FEAT_EVAL
+	did_uncaught_emsg = TRUE;
+#endif
     }
 
     emsg_on_display = TRUE;	/* remember there is an error message */
@@ -2313,7 +2314,7 @@ msg_scroll_up(void)
 	gui_undraw_cursor();
 #endif
     /* scrolling up always works */
-    screen_del_lines(0, 0, 1, (int)Rows, TRUE, NULL);
+    screen_del_lines(0, 0, 1, (int)Rows, TRUE, 0, NULL);
 
     if (!can_clear((char_u *)" "))
     {
@@ -2905,7 +2906,7 @@ do_more_prompt(int typed_char)
 		    }
 
 		    if (toscroll == -1 && screen_ins_lines(0, 0, 1,
-						       (int)Rows, NULL) == OK)
+						     (int)Rows, 0, NULL) == OK)
 		    {
 			/* display line at top */
 			(void)disp_sb_line(0, mp);

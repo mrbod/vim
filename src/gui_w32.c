@@ -1840,6 +1840,7 @@ process_message(void)
 	{
 	    trash_input_buf();
 	    got_int = TRUE;
+	    ctrl_break_was_pressed = TRUE;
 	    string[0] = Ctrl_C;
 	    add_to_input_buf(string, 1);
 	}
@@ -2072,20 +2073,23 @@ gui_mch_wait_for_chars(int wtime)
 	did_add_timer = FALSE;
 #endif
 #ifdef MESSAGE_QUEUE
-	/* Check channel while waiting message. */
+	/* Check channel I/O while waiting for a message. */
 	for (;;)
 	{
 	    MSG msg;
 
 	    parse_queued_messages();
 
-	    if (pPeekMessage(&msg, NULL, 0, 0, PM_NOREMOVE)
-		|| MsgWaitForMultipleObjects(0, NULL, FALSE, 100, QS_ALLINPUT)
-								!= WAIT_TIMEOUT)
+	    if (pPeekMessage(&msg, NULL, 0, 0, PM_NOREMOVE))
+	    {
+		process_message();
+		break;
+	    }
+	    else if (MsgWaitForMultipleObjects(0, NULL, FALSE, 100, QS_ALLINPUT)
+							       != WAIT_TIMEOUT)
 		break;
 	}
-#endif
-
+#else
 	/*
 	 * Don't use gui_mch_update() because then we will spin-lock until a
 	 * char arrives, instead we use GetMessage() to hang until an
@@ -2093,6 +2097,7 @@ gui_mch_wait_for_chars(int wtime)
 	 * returning as soon as it contains a single char -- webb
 	 */
 	process_message();
+#endif
 
 	if (input_available())
 	{
@@ -2942,13 +2947,11 @@ _OnActivateApp(
     return MyWindowProc(hwnd, WM_ACTIVATEAPP, fActivate, (DWORD)dwThreadId);
 }
 
-#if defined(FEAT_WINDOWS) || defined(PROTO)
     void
 gui_mch_destroy_scrollbar(scrollbar_T *sb)
 {
     DestroyWindow(sb->id);
 }
-#endif
 
 /*
  * Get current mouse coordinates in text window.
@@ -3780,12 +3783,11 @@ _OnDropFiles(
     HWND hwnd UNUSED,
     HDROP hDrop)
 {
-#ifdef FEAT_WINDOWS
-# define BUFPATHLEN _MAX_PATH
-# define DRAGQVAL 0xFFFFFFFF
-# ifdef FEAT_MBYTE
+#define BUFPATHLEN _MAX_PATH
+#define DRAGQVAL 0xFFFFFFFF
+#ifdef FEAT_MBYTE
     WCHAR   wszFile[BUFPATHLEN];
-# endif
+#endif
     char    szFile[BUFPATHLEN];
     UINT    cFiles = DragQueryFile(hDrop, DRAGQVAL, NULL, 0);
     UINT    i;
@@ -3806,11 +3808,11 @@ _OnDropFiles(
     if (fnames != NULL)
 	for (i = 0; i < cFiles; ++i)
 	{
-# ifdef FEAT_MBYTE
+#ifdef FEAT_MBYTE
 	    if (DragQueryFileW(hDrop, i, wszFile, BUFPATHLEN) > 0)
 		fnames[i] = utf16_to_enc(wszFile, NULL);
 	    else
-# endif
+#endif
 	    {
 		DragQueryFile(hDrop, i, szFile, BUFPATHLEN);
 		fnames[i] = vim_strsave((char_u *)szFile);
@@ -3832,7 +3834,6 @@ _OnDropFiles(
 
 	s_need_activate = TRUE;
     }
-#endif
 }
 
     static int
@@ -4383,7 +4384,7 @@ add_dialog_element(
 	WORD clss,
 	const char *caption);
 static LPWORD lpwAlign(LPWORD);
-static int nCopyAnsiToWideChar(LPWORD, LPSTR);
+static int nCopyAnsiToWideChar(LPWORD, LPSTR, BOOL);
 #if defined(FEAT_MENU) && defined(FEAT_TEAROFF)
 static void gui_mch_tearoff(char_u *title, vimmenu_T *menu, int initX, int initY);
 #endif
@@ -5458,9 +5459,7 @@ gui_mch_init(void)
 #endif
     s_hdc = GetDC(s_textArea);
 
-#ifdef FEAT_WINDOWS
     DragAcceptFiles(s_hwnd, TRUE);
-#endif
 
     /* Do we need to bother with this? */
     /* m_fMouseAvail = GetSystemMetrics(SM_MOUSEPRESENT); */
@@ -5776,7 +5775,7 @@ _OnImeNotify(HWND hWnd, DWORD dwCommand, DWORD dwData UNUSED)
 		State &= ~LANGMAP;
 		if (State & INSERT)
 		{
-#if defined(FEAT_WINDOWS) && defined(FEAT_KEYMAP)
+#if defined(FEAT_KEYMAP)
 		    /* Unshown 'keymap' in status lines */
 		    if (curbuf->b_p_iminsert == B_IMODE_LMAP)
 		    {
@@ -6422,6 +6421,18 @@ gui_mch_draw_string(
 	DeleteObject(SelectObject(s_hdc, old_pen));
     }
 
+    /* Strikethrough */
+    if (flags & DRAW_STRIKE)
+    {
+	hpen = CreatePen(PS_SOLID, 1, gui.currSpColor);
+	old_pen = SelectObject(s_hdc, hpen);
+	y = FILL_Y(row + 1) - gui.char_height/2;
+	MoveToEx(s_hdc, FILL_X(col), y, NULL);
+	/* Note: LineTo() excludes the last pixel in the line. */
+	LineTo(s_hdc, FILL_X(col + len), y);
+	DeleteObject(SelectObject(s_hdc, old_pen));
+    }
+
     /* Undercurl */
     if (flags & DRAW_UNDERC)
     {
@@ -6597,7 +6608,7 @@ gui_make_popup(char_u *path_name, int mouse_pos)
 	}
 	else if (curwin != NULL)
 	{
-	    p.x += TEXT_X(W_WINCOL(curwin) + curwin->w_wcol + 1);
+	    p.x += TEXT_X(curwin->w_wincol + curwin->w_wcol + 1);
 	    p.y += TEXT_Y(W_WINROW(curwin) + curwin->w_wrow + 1);
 	}
 	msg_scroll = FALSE;
@@ -7273,9 +7284,8 @@ gui_mch_dialog(
     add_word(0);	// Class
 
     /* copy the title of the dialog */
-    nchar = nCopyAnsiToWideChar(p, (title ?
-				    (LPSTR)title :
-				    (LPSTR)("Vim "VIM_VERSION_MEDIUM)));
+    nchar = nCopyAnsiToWideChar(p, (title ? (LPSTR)title
+				   : (LPSTR)("Vim "VIM_VERSION_MEDIUM)), TRUE);
     p += nchar;
 
     if (s_usenewlook)
@@ -7287,13 +7297,13 @@ gui_mch_dialog(
 	    /* point size */
 	    *p++ = -MulDiv(lfSysmenu.lfHeight, 72,
 		    GetDeviceCaps(hdc, LOGPIXELSY));
-	    nchar = nCopyAnsiToWideChar(p, TEXT(lfSysmenu.lfFaceName));
+	    nchar = nCopyAnsiToWideChar(p, lfSysmenu.lfFaceName, FALSE);
 	}
 	else
 #endif
 	{
 	    *p++ = DLG_FONT_POINT_SIZE;		// point size
-	    nchar = nCopyAnsiToWideChar(p, TEXT(DLG_FONT_NAME));
+	    nchar = nCopyAnsiToWideChar(p, DLG_FONT_NAME, FALSE);
 	}
 	p += nchar;
     }
@@ -7474,7 +7484,7 @@ add_dialog_element(
     *p++ = (WORD)0xffff;
     *p++ = clss;			//2 more here
 
-    nchar = nCopyAnsiToWideChar(p, (LPSTR)caption); //strlen(caption)+1
+    nchar = nCopyAnsiToWideChar(p, (LPSTR)caption, TRUE); //strlen(caption)+1
     p += nchar;
 
     *p++ = 0;  // advance pointer over nExtraStuff WORD   - 2 more
@@ -7506,11 +7516,13 @@ lpwAlign(
  * parameter as wide character (16-bits / char) string, and returns integer
  * number of wide characters (words) in string (including the trailing wide
  * char NULL).  Partly taken from the Win32SDK samples.
- */
+ * If "use_enc" is TRUE, 'encoding' is used for "lpAnsiIn". If FALSE, current
+ * ACP is used for "lpAnsiIn". */
     static int
 nCopyAnsiToWideChar(
     LPWORD lpWCStr,
-    LPSTR lpAnsiIn)
+    LPSTR lpAnsiIn,
+    BOOL use_enc)
 {
     int		nChar = 0;
 #ifdef FEAT_MBYTE
@@ -7518,7 +7530,7 @@ nCopyAnsiToWideChar(
     int		i;
     WCHAR	*wn;
 
-    if (enc_codepage == 0 && (int)GetACP() != enc_codepage)
+    if (use_enc && enc_codepage >= 0 && (int)GetACP() != enc_codepage)
     {
 	/* Not a codepage, use our own conversion function. */
 	wn = enc_to_utf16((char_u *)lpAnsiIn, NULL);
@@ -7841,8 +7853,8 @@ gui_mch_tearoff(
 
     /* copy the title of the dialog */
     nchar = nCopyAnsiToWideChar(p, ((*title)
-				    ? (LPSTR)title
-				    : (LPSTR)("Vim "VIM_VERSION_MEDIUM)));
+			    ? (LPSTR)title
+			    : (LPSTR)("Vim "VIM_VERSION_MEDIUM)), TRUE);
     p += nchar;
 
     if (s_usenewlook)
@@ -7854,13 +7866,13 @@ gui_mch_tearoff(
 	    /* point size */
 	    *p++ = -MulDiv(lfSysmenu.lfHeight, 72,
 		    GetDeviceCaps(hdc, LOGPIXELSY));
-	    nchar = nCopyAnsiToWideChar(p, TEXT(lfSysmenu.lfFaceName));
+	    nchar = nCopyAnsiToWideChar(p, lfSysmenu.lfFaceName, FALSE);
 	}
 	else
 #endif
 	{
 	    *p++ = DLG_FONT_POINT_SIZE;		// point size
-	    nchar = nCopyAnsiToWideChar (p, TEXT(DLG_FONT_NAME));
+	    nchar = nCopyAnsiToWideChar(p, DLG_FONT_NAME, FALSE);
 	}
 	p += nchar;
     }

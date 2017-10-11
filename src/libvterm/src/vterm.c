@@ -130,7 +130,8 @@ static int outbuffer_is_full(VTerm *vt)
   return vt->outbuffer_cur >= vt->outbuffer_len - 1;
 }
 
-#if _XOPEN_SOURCE >= 500 || _ISOC99_SOURCE || _BSD_SOURCE
+#if (defined(_XOPEN_SOURCE) && _XOPEN_SOURCE >= 500) \
+	|| defined(_ISOC99_SOURCE) || defined(_BSD_SOURCE)
 # undef VSNPRINTF
 # define VSNPRINTF vsnprintf
 #else
@@ -294,6 +295,7 @@ VTermValueType vterm_get_prop_type(VTermProp prop)
     case VTERM_PROP_REVERSE:       return VTERM_VALUETYPE_BOOL;
     case VTERM_PROP_CURSORSHAPE:   return VTERM_VALUETYPE_INT;
     case VTERM_PROP_MOUSE:         return VTERM_VALUETYPE_INT;
+    case VTERM_PROP_CURSORCOLOR:   return VTERM_VALUETYPE_STRING;
   }
   return 0; /* UNREACHABLE */
 }

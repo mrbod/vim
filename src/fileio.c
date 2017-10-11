@@ -1370,7 +1370,8 @@ retry:
 		 * Decrypt the read bytes.  This is done before checking for
 		 * EOF because the crypt layer may be buffering.
 		 */
-		if (cryptkey != NULL && size > 0)
+		if (cryptkey != NULL && curbuf->b_cryptstate != NULL
+								   && size > 0)
 		{
 		    if (crypt_works_inplace(curbuf->b_cryptstate))
 		    {
@@ -4173,9 +4174,7 @@ buf_write(
 #ifdef FEAT_TITLE
 	need_maketitle = TRUE;	    /* set window title later */
 #endif
-#ifdef FEAT_WINDOWS
 	status_redraw_all();	    /* redraw status lines later */
-#endif
     }
 
     if (end > buf->b_ml.ml_line_count)
@@ -6196,10 +6195,8 @@ shorten_fnames(int force)
 	 * also have a swap file. */
 	mf_fullname(buf->b_ml.ml_mfp);
     }
-#ifdef FEAT_WINDOWS
     status_redraw_all();
     redraw_tabline = TRUE;
-#endif
 }
 
 #if (defined(FEAT_DND) && defined(FEAT_GUI_GTK)) \
@@ -6889,6 +6886,9 @@ buf_check_timestamp(
 #endif
 #ifdef FEAT_NETBEANS_INTG
 	    || isNetbeansBuffer(buf)
+#endif
+#ifdef FEAT_TERMINAL
+	    || buf->b_term != NULL
 #endif
 	    )
 	return 0;
@@ -8959,9 +8959,7 @@ aucmd_prepbuf(
     buf_T	*buf)		/* new curbuf */
 {
     win_T	*win;
-#ifdef FEAT_WINDOWS
     int		save_ea;
-#endif
 #ifdef FEAT_AUTOCHDIR
     int		save_acd;
 #endif
@@ -8970,13 +8968,9 @@ aucmd_prepbuf(
     if (buf == curbuf)		/* be quick when buf is curbuf */
 	win = curwin;
     else
-#ifdef FEAT_WINDOWS
 	FOR_ALL_WINDOWS(win)
 	    if (win->w_buffer == buf)
 		break;
-#else
-	win = NULL;
-#endif
 
     /* Allocate "aucmd_win" when needed.  If this fails (out of memory) fall
      * back to using the current window. */
@@ -9022,7 +9016,6 @@ aucmd_prepbuf(
 	globaldir = NULL;
 
 
-#ifdef FEAT_WINDOWS
 	/* Split the current window, put the aucmd_win in the upper half.
 	 * We don't want the BufEnter or WinEnter autocommands. */
 	block_autocmds();
@@ -9030,20 +9023,19 @@ aucmd_prepbuf(
 	save_ea = p_ea;
 	p_ea = FALSE;
 
-# ifdef FEAT_AUTOCHDIR
+#ifdef FEAT_AUTOCHDIR
 	/* Prevent chdir() call in win_enter_ext(), through do_autochdir(). */
 	save_acd = p_acd;
 	p_acd = FALSE;
-# endif
+#endif
 
 	(void)win_split_ins(0, WSP_TOP, aucmd_win, 0);
 	(void)win_comp_pos();   /* recompute window positions */
 	p_ea = save_ea;
-# ifdef FEAT_AUTOCHDIR
+#ifdef FEAT_AUTOCHDIR
 	p_acd = save_acd;
-# endif
-	unblock_autocmds();
 #endif
+	unblock_autocmds();
 	curwin = aucmd_win;
     }
     curbuf = buf;
@@ -9060,14 +9052,11 @@ aucmd_prepbuf(
 aucmd_restbuf(
     aco_save_T	*aco)		/* structure holding saved values */
 {
-#ifdef FEAT_WINDOWS
     int dummy;
-#endif
 
     if (aco->use_aucmd_win)
     {
 	--curbuf->b_nwindows;
-#ifdef FEAT_WINDOWS
 	/* Find "aucmd_win", it can't be closed, but it may be in another tab
 	 * page. Do not trigger autocommands here. */
 	block_autocmds();
@@ -9108,12 +9097,9 @@ win_found:
 	else
 	    /* Hmm, original window disappeared.  Just use the first one. */
 	    curwin = firstwin;
-# ifdef FEAT_EVAL
+#ifdef FEAT_EVAL
 	vars_clear(&aucmd_win->w_vars->dv_hashtab);  /* free all w: variables */
 	hash_init(&aucmd_win->w_vars->dv_hashtab);   /* re-use the hashtab */
-# endif
-#else
-	curwin = aco->save_curwin;
 #endif
 	curbuf = curwin->w_buffer;
 
@@ -9139,9 +9125,7 @@ win_found:
     else
     {
 	/* restore curwin */
-#ifdef FEAT_WINDOWS
 	if (win_valid(aco->save_curwin))
-#endif
 	{
 	    /* Restore the buffer which was previously edited by curwin, if
 	     * it was changed, we are still the same window and the buffer is

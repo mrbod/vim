@@ -59,7 +59,7 @@ static int	block_redo = FALSE;
  * Returns a value between 0 and 255, index in maphash.
  * Put Normal/Visual mode mappings mostly separately from Insert/Cmdline mode.
  */
-#define MAP_HASH(mode, c1) (((mode) & (NORMAL + VISUAL + SELECTMODE + OP_PENDING)) ? (c1) : ((c1) ^ 0x80))
+#define MAP_HASH(mode, c1) (((mode) & (NORMAL + VISUAL + SELECTMODE + OP_PENDING + TERMINAL)) ? (c1) : ((c1) ^ 0x80))
 
 /*
  * Each mapping is put in one of the 256 hash lists, to speed up finding it.
@@ -125,7 +125,7 @@ static int	vgetorpeek(int);
 static void	map_free(mapblock_T **);
 static void	validate_maphash(void);
 static void	showmap(mapblock_T *mp, int local);
-static int	inchar(char_u *buf, int maxlen, long wait_time, int tb_change_cnt);
+static int	inchar(char_u *buf, int maxlen, long wait_time);
 #ifdef FEAT_EVAL
 static char_u	*eval_map_expr(char_u *str, int c);
 #endif
@@ -462,8 +462,7 @@ flush_buffers(int flush_typeahead)
 	 * of an escape sequence.
 	 * In an xterm we get one char at a time and we have to get them all.
 	 */
-	while (inchar(typebuf.tb_buf, typebuf.tb_buflen - 1, 10L,
-						  typebuf.tb_change_cnt) != 0)
+	while (inchar(typebuf.tb_buf, typebuf.tb_buflen - 1, 10L) != 0)
 	    ;
 	typebuf.tb_off = MAXMAPLEN;
 	typebuf.tb_len = 0;
@@ -1599,8 +1598,13 @@ vgetc(void)
       {
 	int did_inc = FALSE;
 
-	if (mod_mask)		/* no mapping after modifier has been read */
+	if (mod_mask
+#if defined(FEAT_XIM) && defined(FEAT_GUI_GTK)
+	    || im_is_preediting()
+#endif
+		)
 	{
+	    /* no mapping after modifier has been read */
 	    ++no_mapping;
 	    ++allow_keys;
 	    did_inc = TRUE;	/* mod_mask may change value */
@@ -2046,8 +2050,7 @@ vgetorpeek(int advance)
 		if (got_int)
 		{
 		    /* flush all input */
-		    c = inchar(typebuf.tb_buf, typebuf.tb_buflen - 1, 0L,
-						       typebuf.tb_change_cnt);
+		    c = inchar(typebuf.tb_buf, typebuf.tb_buflen - 1, 0L);
 		    /*
 		     * If inchar() returns TRUE (script file was active) or we
 		     * are inside a mapping, get out of insert mode.
@@ -2287,10 +2290,8 @@ vgetorpeek(int advance)
 				msg_row = Rows - 1;
 				msg_clr_eos();		/* clear ruler */
 			    }
-#ifdef FEAT_WINDOWS
 			    status_redraw_all();
 			    redraw_statuslines();
-#endif
 			    showmode();
 			    setcursor();
 			    continue;
@@ -2610,8 +2611,7 @@ vgetorpeek(int advance)
 			&& (p_timeout
 			    || (keylen == KEYLEN_PART_KEY && p_ttimeout))
 			&& (c = inchar(typebuf.tb_buf + typebuf.tb_off
-						     + typebuf.tb_len, 3, 25L,
-						 typebuf.tb_change_cnt)) == 0)
+					       + typebuf.tb_len, 3, 25L)) == 0)
 		{
 		    colnr_T	col = 0, vcol;
 		    char_u	*ptr;
@@ -2666,8 +2666,8 @@ vgetorpeek(int advance)
 					++col;
 				}
 				curwin->w_wrow = curwin->w_cline_row
-					   + curwin->w_wcol / W_WIDTH(curwin);
-				curwin->w_wcol %= W_WIDTH(curwin);
+					   + curwin->w_wcol / curwin->w_width;
+				curwin->w_wcol %= curwin->w_width;
 				curwin->w_wcol += curwin_col_off();
 #ifdef FEAT_MBYTE
 				col = 0;	/* no correction needed */
@@ -2684,7 +2684,7 @@ vgetorpeek(int advance)
 			else if (curwin->w_p_wrap && curwin->w_wrow)
 			{
 			    --curwin->w_wrow;
-			    curwin->w_wcol = W_WIDTH(curwin) - 1;
+			    curwin->w_wcol = curwin->w_width - 1;
 #ifdef FEAT_MBYTE
 			    col = curwin->w_cursor.col - 1;
 #endif
@@ -2848,7 +2848,7 @@ vgetorpeek(int advance)
 				    ? -1L
 				    : ((keylen == KEYLEN_PART_KEY && p_ttm >= 0)
 					    ? p_ttm
-					    : p_tm)), typebuf.tb_change_cnt);
+					    : p_tm)));
 
 #ifdef FEAT_CMDL_INFO
 		if (i != 0)
@@ -2954,12 +2954,12 @@ vgetorpeek(int advance)
 inchar(
     char_u	*buf,
     int		maxlen,
-    long	wait_time,	    /* milli seconds */
-    int		tb_change_cnt)
+    long	wait_time)	    /* milli seconds */
 {
     int		len = 0;	    /* init for GCC */
     int		retesc = FALSE;	    /* return ESC with gotint */
     int		script_char;
+    int		tb_change_cnt = typebuf.tb_change_cnt;
 
     if (wait_time == -1L || wait_time > 100L)  /* flush output before waiting */
     {
@@ -3065,8 +3065,16 @@ inchar(
 	len = ui_inchar(buf, maxlen / 3, wait_time, tb_change_cnt);
     }
 
+    /* If the typebuf was changed further down, it is like nothing was added by
+     * this call. */
     if (typebuf_changed(tb_change_cnt))
 	return 0;
+
+    /* Note the change in the typeahead buffer, this matters for when
+     * vgetorpeek() is called recursively, e.g. using getchar(1) in a timer
+     * function. */
+    if (len > 0 && ++typebuf.tb_change_cnt == 0)
+	typebuf.tb_change_cnt = 1;
 
     return fix_input_buffer(buf, len);
 }
@@ -3178,6 +3186,7 @@ input_available(void)
  * for :xmap  mode is VISUAL
  * for :smap  mode is SELECTMODE
  * for :omap  mode is OP_PENDING
+ * for :tmap  mode is TERMINAL
  *
  * for :abbr  mode is INSERT + CMDLINE
  * for :iabbr mode is INSERT
@@ -3822,6 +3831,8 @@ get_map_mode(char_u **cmdp, int forceit)
 	mode = SELECTMODE;			/* :smap */
     else if (modec == 'o')
 	mode = OP_PENDING;			/* :omap */
+    else if (modec == 't')
+	mode = TERMINAL;			/* :tmap */
     else
     {
 	--p;
@@ -4881,6 +4892,9 @@ makemap(
 			break;
 		    case LANGMAP:
 			c1 = 'l';
+			break;
+		    case TERMINAL:
+			c1 = 't';
 			break;
 		    default:
 			IEMSG(_("E228: makemap: Illegal mode"));

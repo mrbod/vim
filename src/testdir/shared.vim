@@ -1,5 +1,10 @@
 " Functions shared by several tests.
 
+" Only load this script once.
+if exists('*WaitFor')
+  finish
+endif
+
 " Get the name of the Python executable.
 " Also keeps it in s:python.
 func PythonProg()
@@ -165,16 +170,36 @@ func s:feedkeys(timer)
   call feedkeys('x', 'nt')
 endfunc
 
-" Get the command to run Vim, with -u NONE and --not-a-term arguments.
-" Returns an empty string on error.
-func GetVimCommand()
+" Get $VIMPROG to run Vim executable.
+" The Makefile writes it as the first line in the "vimcmd" file.
+func GetVimProg()
   if !filereadable('vimcmd')
     return ''
   endif
-  let cmd = readfile('vimcmd')[0]
-  let cmd = substitute(cmd, '-u \f\+', '-u NONE', '')
-  if cmd !~ '-u NONE'
-    let cmd = cmd . ' -u NONE'
+  return readfile('vimcmd')[0]
+endfunc
+
+" Get the command to run Vim, with -u NONE and --not-a-term arguments.
+" If there is an argument use it instead of "NONE".
+" Returns an empty string on error.
+func GetVimCommand(...)
+  if !filereadable('vimcmd')
+    return ''
+  endif
+  if a:0 == 0
+    let name = 'NONE'
+  else
+    let name = a:1
+  endif
+  " For Unix Makefile writes the command to use in the second line of the
+  " "vimcmd" file, including environment options.
+  " Other Makefiles just write the executable in the first line, so fall back
+  " to that if there is no second line.
+  let lines = readfile('vimcmd')
+  let cmd = get(lines, 1, lines[0])
+  let cmd = substitute(cmd, '-u \f\+', '-u ' . name, '')
+  if cmd !~ '-u '. name
+    let cmd = cmd . ' -u ' . name
   endif
   let cmd .= ' --not-a-term'
   let cmd = substitute(cmd, 'VIMRUNTIME=.*VIMRUNTIME;', '', '')
@@ -214,4 +239,8 @@ func RunVimPiped(before, after, arguments, pipecmd)
     call delete('Xafter.vim')
   endif
   return 1
+endfunc
+
+func CanRunGui()
+  return has('gui') && ($DISPLAY != "" || has('gui_running'))
 endfunc

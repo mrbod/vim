@@ -1612,7 +1612,7 @@ gui_mac_scroll_action(ControlHandle theControl, short partCode)
     else			/* Bottom scrollbar */
     {
 	sb_info = sb;
-	page = W_WIDTH(curwin) - 5;
+	page = curwin->w_width - 5;
     }
 
     switch (partCode)
@@ -3898,6 +3898,11 @@ draw_string_QD(int row, int col, char_u *s, int len, int flags)
 	{
 	    MoveTo(FILL_X(col), FILL_Y(row + 1) - 1);
 	    LineTo(FILL_X(col + len) - 1, FILL_Y(row + 1) - 1);
+	}
+	if (flags & DRAW_STRIKE)
+	{
+	    MoveTo(FILL_X(col), FILL_Y(row + 1) - gui.char_height/2);
+	    LineTo(FILL_X(col + len) - 1, FILL_Y(row + 1) - gui.char_height/2);
 	}
     }
 

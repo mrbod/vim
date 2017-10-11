@@ -1125,7 +1125,7 @@ getcmdline(
 #ifdef CURSOR_SHAPE
 		ui_cursor_shape();	/* may show different cursor shape */
 #endif
-#if defined(FEAT_WINDOWS) && defined(FEAT_KEYMAP)
+#if defined(FEAT_KEYMAP)
 		/* Show/unshow value of 'keymap' in status lines later. */
 		status_redraw_curbuf();
 #endif
@@ -1966,11 +1966,9 @@ cmdline_changed:
 		end_pos = curwin->w_cursor; /* shutup gcc 4 */
 
 	    validate_cursor();
-# ifdef FEAT_WINDOWS
 	    /* May redraw the status line to show the cursor position. */
 	    if (p_ru && curwin->w_status_height > 0)
 		curwin->w_redr_status = TRUE;
-# endif
 
 	    save_cmdline(&save_ccline);
 	    update_screen(SOME_VALID);
@@ -3440,7 +3438,7 @@ compute_cmdrow(void)
 	cmdline_row = Rows - 1;
     else
 	cmdline_row = W_WINROW(lastwin) + lastwin->w_height
-						   + W_STATUS_HEIGHT(lastwin);
+						    + lastwin->w_status_height;
 }
 
     static void
@@ -3468,7 +3466,8 @@ cursorcmd(void)
 
     windgoto(msg_row, msg_col);
 #if defined(FEAT_XIM) && defined(FEAT_GUI_GTK)
-    redrawcmd_preedit();
+    if (p_imst == IM_ON_THE_SPOT)
+	redrawcmd_preedit();
 #endif
 #ifdef MCH_CURSOR_SHAPE
     mch_update_cursor();

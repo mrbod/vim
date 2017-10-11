@@ -177,7 +177,7 @@ ex_align(exarg_T *eap)
 	if (width <= 0)
 	    width = curbuf->b_p_tw;
 	if (width == 0 && curbuf->b_p_wm > 0)
-	    width = W_WIDTH(curwin) - curbuf->b_p_wm;
+	    width = curwin->w_width - curbuf->b_p_wm;
 	if (width <= 0)
 	    width = 80;
     }
@@ -2098,11 +2098,16 @@ viminfo_filename(char_u *file)
 	else if ((file = find_viminfo_parameter('n')) == NULL || *file == NUL)
 	{
 #ifdef VIMINFO_FILE2
-	    /* don't use $HOME when not defined (turned into "c:/"!). */
 # ifdef VMS
 	    if (mch_getenv((char_u *)"SYS$LOGIN") == NULL)
 # else
+#  ifdef MSWIN
+	    /* Use $VIM only if $HOME is the default "C:/". */
+	    if (STRCMP(vim_getenv((char_u *)"HOME", NULL), "C:/") == 0
+		    && mch_getenv((char_u *)"HOME") == NULL)
+#  else
 	    if (mch_getenv((char_u *)"HOME") == NULL)
+#  endif
 # endif
 	    {
 		/* don't use $VIM when not available. */
@@ -3220,9 +3225,7 @@ do_write(exarg_T *eap)
 	    if (retval == OK)
 	    {
 		curbuf->b_p_ro = FALSE;
-#ifdef FEAT_WINDOWS
 		redraw_tabline = TRUE;
-#endif
 	    }
 	}
 
@@ -3572,7 +3575,7 @@ getfile(
 	{
 	    if (other)
 		--no_wait_return;
-	    EMSG(_(e_nowrtmsg));
+	    no_write_message();
 	    retval = GETFILE_NOT_WRITTEN;	/* file has been changed */
 	    goto theend;
 	}
@@ -4148,7 +4151,6 @@ do_ecmd(
 #ifdef FEAT_FOLDING
 	/* It's possible that all lines in the buffer changed.  Need to update
 	 * automatic folding for all windows where it's used. */
-# ifdef FEAT_WINDOWS
 	{
 	    win_T	    *win;
 	    tabpage_T	    *tp;
@@ -4157,9 +4159,6 @@ do_ecmd(
 		if (win->w_buffer == curbuf)
 		    foldUpdateAll(win);
 	}
-# else
-	foldUpdateAll(curwin);
-# endif
 #endif
 
 	/* Change directories when the 'acd' option is set. */
@@ -4279,10 +4278,8 @@ do_ecmd(
 	}
     }
 
-#ifdef FEAT_WINDOWS
     /* Check if cursors in other windows on the same buffer are still valid */
     check_lnums(FALSE);
-#endif
 
     /*
      * Did not read the file, need to show some info about the file.
@@ -4578,10 +4575,8 @@ ex_z(exarg_T *eap)
      * 'scroll' */
     if (eap->forceit)
 	bigness = curwin->w_height;
-#ifdef FEAT_WINDOWS
     else if (!ONE_WINDOW)
 	bigness = curwin->w_height - 3;
-#endif
     else
 	bigness = curwin->w_p_scr * 2;
     if (bigness < 1)
@@ -6147,7 +6142,7 @@ free_old_sub(void)
 }
 #endif
 
-#if (defined(FEAT_WINDOWS) && defined(FEAT_QUICKFIX)) || defined(PROTO)
+#if defined(FEAT_QUICKFIX) || defined(PROTO)
 /*
  * Set up for a tagpreview.
  * Return TRUE when it was created.
@@ -6210,9 +6205,7 @@ ex_help(exarg_T *eap)
     FILE	*helpfd;	/* file descriptor of help file */
     int		n;
     int		i;
-#ifdef FEAT_WINDOWS
     win_T	*wp;
-#endif
     int		num_matches;
     char_u	**matches;
     char_u	*p;
@@ -6314,13 +6307,8 @@ ex_help(exarg_T *eap)
      * Re-use an existing help window or open a new one.
      * Always open a new one for ":tab help".
      */
-    if (!bt_help(curwin->w_buffer)
-#ifdef FEAT_WINDOWS
-	    || cmdmod.tab != 0
-#endif
-	    )
+    if (!bt_help(curwin->w_buffer) || cmdmod.tab != 0)
     {
-#ifdef FEAT_WINDOWS
 	if (cmdmod.tab != 0)
 	    wp = NULL;
 	else
@@ -6330,7 +6318,6 @@ ex_help(exarg_T *eap)
 	if (wp != NULL && wp->w_buffer->b_nwindows > 0)
 	    win_enter(wp, TRUE);
 	else
-#endif
 	{
 	    /*
 	     * There is no help window yet.
@@ -6343,7 +6330,6 @@ ex_help(exarg_T *eap)
 	    }
 	    fclose(helpfd);
 
-#ifdef FEAT_WINDOWS
 	    /* Split off help window; put it at far top if no position
 	     * specified, the current window is vertically split and
 	     * narrow. */
@@ -6353,16 +6339,9 @@ ex_help(exarg_T *eap)
 		n |= WSP_TOP;
 	    if (win_split(0, n) == FAIL)
 		goto erret;
-#else
-	    /* use current window */
-	    if (!can_abandon(curbuf, FALSE))
-		goto erret;
-#endif
 
-#ifdef FEAT_WINDOWS
 	    if (curwin->w_height < p_hh)
 		win_setheight((int)p_hh);
-#endif
 
 	    /*
 	     * Open help file (do_ecmd() will set b_help flag, readfile() will
@@ -6372,12 +6351,7 @@ ex_help(exarg_T *eap)
 	    alt_fnum = curbuf->b_fnum;
 	    (void)do_ecmd(0, NULL, NULL, NULL, ECMD_LASTL,
 			  ECMD_HIDE + ECMD_SET_HELP,
-#ifdef FEAT_WINDOWS
-			  NULL  /* buffer is still open, don't store info */
-#else
-			  curwin
-#endif
-		    );
+			  NULL);  /* buffer is still open, don't store info */
 	    if (!cmdmod.keepalt)
 		curwin->w_alt_fnum = alt_fnum;
 	    empty_fnum = curbuf->b_fnum;
@@ -6420,7 +6394,6 @@ erret:
     void
 ex_helpclose(exarg_T *eap UNUSED)
 {
-#if defined(FEAT_WINDOWS)
     win_T *win;
 
     FOR_ALL_WINDOWS(win)
@@ -6431,7 +6404,6 @@ ex_helpclose(exarg_T *eap UNUSED)
 	    return;
 	}
     }
-#endif
 }
 
 #if defined(FEAT_MULTI_LANG) || defined(PROTO)
@@ -8345,9 +8317,7 @@ ex_drop(exarg_T *eap)
     int		split = FALSE;
     win_T	*wp;
     buf_T	*buf;
-# ifdef FEAT_WINDOWS
     tabpage_T	*tp;
-# endif
 
     /*
      * Check if the first argument is already being edited in a window.  If
@@ -8367,7 +8337,6 @@ ex_drop(exarg_T *eap)
     if (ARGCOUNT == 0)
 	return;
 
-# ifdef FEAT_WINDOWS
     if (cmdmod.tab)
     {
 	/* ":tab drop file ...": open a tab for each argument that isn't
@@ -8376,7 +8345,6 @@ ex_drop(exarg_T *eap)
 	ex_all(eap);
     }
     else
-# endif
     {
 	/* ":drop file ...": Edit the first argument.  Jump to an existing
 	 * window if possible, edit in current window if the current buffer
@@ -8387,9 +8355,7 @@ ex_drop(exarg_T *eap)
 	{
 	    if (wp->w_buffer == buf)
 	    {
-# ifdef FEAT_WINDOWS
 		goto_tabpage_win(tp, wp);
-# endif
 		curwin->w_arg_idx = 0;
 		return;
 	    }
@@ -8403,16 +8369,9 @@ ex_drop(exarg_T *eap)
 	 */
 	if (!buf_hide(curbuf))
 	{
-# ifdef FEAT_WINDOWS
 	    ++emsg_off;
-# endif
 	    split = check_changed(curbuf, CCGD_AW | CCGD_EXCMD);
-# ifdef FEAT_WINDOWS
 	    --emsg_off;
-# else
-	    if (split)
-		return;
-# endif
 	}
 
 	/* Fake a ":sfirst" or ":first" command edit the first argument. */

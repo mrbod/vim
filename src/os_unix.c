@@ -365,6 +365,11 @@ mch_chdir(char *path)
 # endif
 }
 
+/* Why is NeXT excluded here (and not in os_unixx.h)? */
+#if defined(ECHOE) && defined(ICANON) && (defined(HAVE_TERMIO_H) || defined(HAVE_TERMIOS_H)) && !defined(__NeXT__)
+# define NEW_TTY_SYSTEM
+#endif
+
 /*
  * Write s[len] to the screen.
  */
@@ -2275,6 +2280,7 @@ vim_is_xterm(char_u *name)
 		|| STRNICMP(name, "kterm", 5) == 0
 		|| STRNICMP(name, "mlterm", 6) == 0
 		|| STRNICMP(name, "rxvt", 4) == 0
+		|| STRNICMP(name, "screen.xterm", 12) == 0
 		|| STRCMP(name, "builtin_xterm") == 0);
 }
 
@@ -3385,11 +3391,7 @@ mch_settmode(int tmode)
 {
     static int first = TRUE;
 
-    /* Why is NeXT excluded here (and not in os_unixx.h)? */
-#if defined(ECHOE) && defined(ICANON) && (defined(HAVE_TERMIO_H) || defined(HAVE_TERMIOS_H)) && !defined(__NeXT__)
-    /*
-     * for "new" tty systems
-     */
+#ifdef NEW_TTY_SYSTEM
 # ifdef HAVE_TERMIOS_H
     static struct termios told;
 	   struct termios tnew;
@@ -3451,7 +3453,6 @@ mch_settmode(int tmode)
 # endif
 
 #else
-
     /*
      * for "old" tty systems
      */
@@ -3492,48 +3493,72 @@ mch_settmode(int tmode)
     void
 get_stty(void)
 {
-    char_u  buf[2];
-    char_u  *p;
+    ttyinfo_T	info;
+    char_u	buf[2];
+    char_u	*p;
 
-    /* Why is NeXT excluded here (and not in os_unixx.h)? */
-#if defined(ECHOE) && defined(ICANON) && (defined(HAVE_TERMIO_H) || defined(HAVE_TERMIOS_H)) && !defined(__NeXT__)
-    /* for "new" tty systems */
+    if (get_tty_info(read_cmd_fd, &info) == OK)
+    {
+	intr_char = info.interrupt;
+	buf[0] = info.backspace;
+	buf[1] = NUL;
+	add_termcode((char_u *)"kb", buf, FALSE);
+
+	/* If <BS> and <DEL> are now the same, redefine <DEL>. */
+	p = find_termcode((char_u *)"kD");
+	if (p != NULL && p[0] == buf[0] && p[1] == buf[1])
+	    do_fixdel(NULL);
+    }
+}
+
+/*
+ * Obtain the characters that Backspace and Enter produce on "fd".
+ * Returns OK or FAIL.
+ */
+    int
+get_tty_info(int fd, ttyinfo_T *info)
+{
+#ifdef NEW_TTY_SYSTEM
 # ifdef HAVE_TERMIOS_H
     struct termios keys;
 # else
     struct termio keys;
 # endif
 
+    if (
 # if defined(HAVE_TERMIOS_H)
-    if (tcgetattr(read_cmd_fd, &keys) != -1)
+	    tcgetattr(fd, &keys) != -1
 # else
-    if (ioctl(read_cmd_fd, TCGETA, &keys) != -1)
+	    ioctl(fd, TCGETA, &keys) != -1
 # endif
+       )
     {
-	buf[0] = keys.c_cc[VERASE];
-	intr_char = keys.c_cc[VINTR];
+	info->backspace = keys.c_cc[VERASE];
+	info->interrupt = keys.c_cc[VINTR];
+	if (keys.c_iflag & ICRNL)
+	    info->enter = NL;
+	else
+	    info->enter = CAR;
+	if (keys.c_oflag & ONLCR)
+	    info->nl_does_cr = TRUE;
+	else
+	    info->nl_does_cr = FALSE;
+	return OK;
+    }
 #else
     /* for "old" tty systems */
     struct sgttyb keys;
 
-    if (ioctl(read_cmd_fd, TIOCGETP, &keys) != -1)
+    if (ioctl(fd, TIOCGETP, &keys) != -1)
     {
-	buf[0] = keys.sg_erase;
-	intr_char = keys.sg_kill;
-#endif
-	buf[1] = NUL;
-	add_termcode((char_u *)"kb", buf, FALSE);
-
-	/*
-	 * If <BS> and <DEL> are now the same, redefine <DEL>.
-	 */
-	p = find_termcode((char_u *)"kD");
-	if (p != NULL && p[0] == buf[0] && p[1] == buf[1])
-	    do_fixdel(NULL);
+	info->backspace = keys.sg_erase;
+	info->interrupt = keys.sg_kill;
+	info->enter = CAR;
+	info->nl_does_cr = TRUE;
+	return OK;
     }
-#if 0
-    }	    /* to keep cindent happy */
 #endif
+    return FAIL;
 }
 
 #endif /* VMS  */
@@ -4049,7 +4074,7 @@ wait4pid(pid_t child, waitstatus *status)
 mch_parse_cmd(char_u *cmd, int use_shcf, char ***argv, int *argc)
 {
     int		i;
-    char_u	*p;
+    char_u	*p, *d;
     int		inquote;
 
     /*
@@ -4067,17 +4092,34 @@ mch_parse_cmd(char_u *cmd, int use_shcf, char ***argv, int *argc)
 	    if (i == 1)
 		(*argv)[*argc] = (char *)p;
 	    ++*argc;
+	    d = p;
 	    while (*p != NUL && (inquote || (*p != ' ' && *p != TAB)))
 	    {
-		if (*p == '"')
+		if (p[0] == '"')
+		    /* quotes surrounding an argument and are dropped */
 		    inquote = !inquote;
+		else
+		{
+		    if (p[0] == '\\' && p[1] != NUL)
+		    {
+			/* First pass: skip over "\ " and "\"".
+			 * Second pass: Remove the backslash. */
+			++p;
+		    }
+		    if (i == 1)
+			*d++ = *p;
+		}
 		++p;
 	    }
 	    if (*p == NUL)
+	    {
+		if (i == 1)
+		    *d++ = NUL;
 		break;
+	    }
 	    if (i == 1)
-		*p++ = NUL;
-	    p = skipwhite(p);
+		*d++ = NUL;
+	    p = skipwhite(p + 1);
 	}
 	if (*argv == NULL)
 	{
@@ -4316,6 +4358,7 @@ mch_call_shell(
 
 # define EXEC_FAILED 122    /* Exit code when shell didn't execute.  Don't use
 			       127, some shells use that already */
+# define OPEN_NULL_FAILED 123 /* Exit code if /dev/null can't be opened */
 
     char_u	*newcmd;
     pid_t	pid;
@@ -5214,6 +5257,7 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options)
     int		use_file_for_in = options->jo_io[PART_IN] == JIO_FILE;
     int		use_file_for_out = options->jo_io[PART_OUT] == JIO_FILE;
     int		use_file_for_err = options->jo_io[PART_ERR] == JIO_FILE;
+    int		use_buffer_for_in = options->jo_io[PART_IN] == JIO_BUFFER;
     int		use_out_for_err = options->jo_io[PART_ERR] == JIO_OUT;
     SIGSET_DECL(curset)
 
@@ -5223,8 +5267,15 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options)
     /* default is to fail */
     job->jv_status = JOB_FAILED;
 
-    if (options->jo_pty)
-	open_pty(&pty_master_fd, &pty_slave_fd, &job->jv_tty_name);
+    if (options->jo_pty
+	    && (!(use_file_for_in || use_null_for_in)
+		|| !(use_file_for_in || use_null_for_out)
+		|| !(use_out_for_err || use_file_for_err || use_null_for_err)))
+    {
+	open_pty(&pty_master_fd, &pty_slave_fd, &job->jv_tty_out);
+	if (job->jv_tty_out != NULL)
+	    job->jv_tty_in = vim_strsave(job->jv_tty_out);
+    }
 
     /* TODO: without the channel feature connect the child to /dev/null? */
     /* Open pipes for stdin, stdout, stderr. */
@@ -5239,8 +5290,12 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options)
 	    goto failed;
 	}
     }
-    else if (!use_null_for_in && pty_master_fd < 0 && pipe(fd_in) < 0)
-	goto failed;
+    else
+	/* When writing buffer lines to the input don't use the pty, so that
+	 * the pipe can be closed when all lines were written. */
+	if (!use_null_for_in && (pty_master_fd < 0 || use_buffer_for_in)
+							    && pipe(fd_in) < 0)
+	    goto failed;
 
     if (use_file_for_out)
     {
@@ -5283,6 +5338,9 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options)
 	    channel = add_channel();
 	if (channel == NULL)
 	    goto failed;
+	if (job->jv_tty_out != NULL)
+	    ch_log(channel, "using pty %s on fd %d",
+					       job->jv_tty_out, pty_master_fd);
     }
 
     BLOCK_SIGNALS(&curset);
@@ -5320,8 +5378,31 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options)
 # endif
 	    set_default_child_environment();
 
+	if (options->jo_env != NULL)
+	{
+	    dict_T	*dict = options->jo_env;
+	    hashitem_T	*hi;
+	    int		todo = (int)dict->dv_hashtab.ht_used;
+
+	    for (hi = dict->dv_hashtab.ht_array; todo > 0; ++hi)
+		if (!HASHITEM_EMPTY(hi))
+		{
+		    typval_T *item = &dict_lookup(hi)->di_tv;
+
+		    vim_setenv((char_u*)hi->hi_key, get_tv_string(item));
+		    --todo;
+		}
+	}
+
 	if (use_null_for_in || use_null_for_out || use_null_for_err)
+	{
 	    null_fd = open("/dev/null", O_RDWR | O_EXTRA, 0);
+	    if (null_fd < 0)
+	    {
+		perror("opening /dev/null failed");
+		_exit(OPEN_NULL_FAILED);
+	    }
+	}
 
 	if (pty_slave_fd >= 0)
 	{
@@ -5387,6 +5468,9 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options)
 	if (null_fd >= 0)
 	    close(null_fd);
 
+	if (options->jo_cwd != NULL && mch_chdir((char *)options->jo_cwd) != 0)
+	    _exit(EXEC_FAILED);
+
 	/* See above for type of argv. */
 	execvp(argv[0], argv);
 
@@ -5407,7 +5491,7 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options)
     job->jv_channel = channel;  /* ch_refcount was set above */
 
     if (pty_master_fd >= 0)
-	close(pty_slave_fd); /* duped above */
+	close(pty_slave_fd); /* not used in the parent */
     /* close child stdin, stdout and stderr */
     if (!use_file_for_in && fd_in[0] >= 0)
 	close(fd_in[0]);
@@ -5557,7 +5641,7 @@ mch_detect_ended_job(job_T *job_list)
  * Return FAIL if "how" is not a valid name.
  */
     int
-mch_stop_job(job_T *job, char_u *how)
+mch_signal_job(job_T *job, char_u *how)
 {
     int	    sig = -1;
     pid_t   job_pid;
@@ -5607,6 +5691,37 @@ mch_clear_job(job_T *job)
 # else
     (void)waitpid(job->jv_pid, NULL, WNOHANG);
 # endif
+}
+#endif
+
+#if defined(FEAT_TERMINAL) || defined(PROTO)
+    int
+mch_create_pty_channel(job_T *job, jobopt_T *options)
+{
+    int		pty_master_fd = -1;
+    int		pty_slave_fd = -1;
+    channel_T	*channel;
+
+    open_pty(&pty_master_fd, &pty_slave_fd, &job->jv_tty_out);
+    if (job->jv_tty_out != NULL)
+	job->jv_tty_in = vim_strsave(job->jv_tty_out);
+    close(pty_slave_fd);
+
+    channel = add_channel();
+    if (channel == NULL)
+    {
+	close(pty_master_fd);
+	return FAIL;
+    }
+    if (job->jv_tty_out != NULL)
+	ch_log(channel, "using pty %s on fd %d",
+					       job->jv_tty_out, pty_master_fd);
+    job->jv_channel = channel;  /* ch_refcount was set by add_channel() */
+    channel->ch_keep_open = TRUE;
+
+    channel_set_pipes(channel, pty_master_fd, pty_master_fd, pty_master_fd);
+    channel_set_job(channel, job, options);
+    return OK;
 }
 #endif
 
@@ -5868,7 +5983,7 @@ RealWaitForChar(int fd, long msec, int *check_for_gpm UNUSED, int *interrupted)
 	}
 # endif
 #ifdef FEAT_JOB_CHANNEL
-	nfd = channel_poll_setup(nfd, &fds);
+	nfd = channel_poll_setup(nfd, &fds, &towait);
 #endif
 	if (interrupted != NULL)
 	    *interrupted = FALSE;
@@ -5920,7 +6035,8 @@ RealWaitForChar(int fd, long msec, int *check_for_gpm UNUSED, int *interrupted)
 	}
 # endif
 #ifdef FEAT_JOB_CHANNEL
-	if (ret > 0)
+	/* also call when ret == 0, we may be polling a keep-open channel */
+	if (ret >= 0)
 	    ret = channel_poll_check(ret, &fds);
 #endif
 
@@ -5996,7 +6112,7 @@ select_eintr:
 	}
 # endif
 # ifdef FEAT_JOB_CHANNEL
-	maxfd = channel_select_setup(maxfd, &rfds, &wfds);
+	maxfd = channel_select_setup(maxfd, &rfds, &wfds, &tv, &tvp);
 # endif
 	if (interrupted != NULL)
 	    *interrupted = FALSE;
@@ -6082,7 +6198,8 @@ select_eintr:
 	}
 # endif
 #ifdef FEAT_JOB_CHANNEL
-	if (ret > 0)
+	/* also call when ret == 0, we may be polling a keep-open channel */
+	if (ret >= 0)
 	    ret = channel_select_check(ret, &rfds, &wfds);
 #endif
 
