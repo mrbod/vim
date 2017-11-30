@@ -9,6 +9,11 @@
 #ifndef VIM__H
 # define VIM__H
 
+#ifdef PROTO
+/* cproto runs into trouble when this type is missing */
+typedef double _Float128;
+#endif
+
 /* use fastcall for Borland, when compiling for Win32 */
 #if defined(__BORLANDC__) && defined(WIN32) && !defined(DEBUG)
 #if defined(FEAT_PERL) || \
@@ -85,28 +90,15 @@
 #endif
 
 /*
- * MACOS_CLASSIC compiling for MacOS prior to MacOS X
- * MACOS_X_UNIX  compiling for MacOS X (using os_unix.c)
- * MACOS_X       compiling for MacOS X (using os_unix.c)
- * MACOS	 compiling for either one
+ * MACOS_X	    compiling for Mac OS X
+ * MACOS_X_DARWIN   integrating the darwin feature into MACOS_X
  */
-#if defined(macintosh) && !defined(MACOS_CLASSIC)
-# define MACOS_CLASSIC
-#endif
-#if defined(MACOS_X_UNIX)
+#if defined(MACOS_X_DARWIN) && !defined(MACOS_X)
 # define MACOS_X
-# ifndef HAVE_CONFIG_H
-#  define UNIX
-# endif
-#endif
-#if defined(MACOS_X) || defined(MACOS_CLASSIC)
-# define MACOS
-#endif
-#if defined(MACOS_X) && defined(MACOS_CLASSIC)
-    Error: To compile for both MACOS X and Classic use a Classic Carbon
 #endif
 /* Unless made through the Makefile enforce GUI on Mac */
-#if defined(MACOS) && !defined(HAVE_CONFIG_H)
+#if defined(MACOS_X) && !defined(HAVE_CONFIG_H)
+# define UNIX
 # define FEAT_GUI_MAC
 #endif
 
@@ -164,15 +156,9 @@
 #  endif
 # endif
 #endif
-#ifdef MACOS
-# if defined(__POWERPC__) || defined(MACOS_X) || defined(__fourbyteints__) \
-  || defined(__MRC__) || defined(__SC__) || defined(__APPLE_CC__)/* MPW Compilers */
-#  define VIM_SIZEOF_INT 4
-# else
-#  define VIM_SIZEOF_INT 2
-# endif
+#if defined(MACOS_X) && !defined(HAVE_CONFIG_H)
+#  define VIM_SIZEOF_INT __SIZEOF_INT__
 #endif
-
 
 /*
  * #defines for optionals and features
@@ -180,7 +166,7 @@
  */
 #include "feature.h"
 
-#if defined(MACOS_X_UNIX)
+#if defined(MACOS_X_DARWIN)
 # if defined(FEAT_SMALL) && !defined(FEAT_CLIPBOARD)
 #  define FEAT_CLIPBOARD
 # endif
@@ -227,7 +213,7 @@
 #endif
 
 /* The Mac conversion stuff doesn't work under X11. */
-#if defined(FEAT_MBYTE) && defined(MACOS_X)
+#if defined(FEAT_MBYTE) && defined(MACOS_X_DARWIN)
 # define MACOS_CONVERT
 #endif
 
@@ -297,10 +283,7 @@
 # include "os_mint.h"
 #endif
 
-#if defined(MACOS)
-# if defined(__MRC__) || defined(__SC__) /* MPW Compilers */
-#  define HAVE_SETENV
-# endif
+#if defined(MACOS_X)
 # include "os_mac.h"
 #endif
 
@@ -548,15 +531,6 @@ typedef unsigned long u8char_T;	    /* long should be 32 bits or more */
 # ifndef FEAT_MBYTE_IME
 #  define FEAT_MBYTE_IME
 # endif
-#endif
-
-/*
- * Check input method control.
- */
-#if defined(FEAT_XIM) \
-    || (defined(FEAT_GUI) && (defined(FEAT_MBYTE_IME) || defined(GLOBAL_IME))) \
-    || (defined(FEAT_GUI_MAC) && defined(FEAT_MBYTE))
-# define USE_IM_CONTROL
 #endif
 
 /*
@@ -1295,6 +1269,8 @@ enum auto_event
     EVENT_BUFWRITEPOST,		/* after writing a buffer */
     EVENT_BUFWRITEPRE,		/* before writing a buffer */
     EVENT_BUFWRITECMD,		/* write buffer using command */
+    EVENT_CMDLINEENTER,		/* after entering the command line */
+    EVENT_CMDLINELEAVE,		/* before leaving the command line */
     EVENT_CMDWINENTER,		/* after entering the cmdline window */
     EVENT_CMDWINLEAVE,		/* before leaving the cmdline window */
     EVENT_COLORSCHEME,		/* after loading a colorscheme */
@@ -1500,6 +1476,11 @@ typedef UINT32_TYPEDEF UINT32_T;
 #define MIN_COLUMNS	12	/* minimal columns for screen */
 #define MIN_LINES	2	/* minimal lines for screen */
 #define STATUS_HEIGHT	1	/* height of a status line under a window */
+#ifdef FEAT_MENU		/* height of a status line under a window */
+# define WINBAR_HEIGHT(wp)	(wp)->w_winbar_height
+#else
+# define WINBAR_HEIGHT(wp)	0
+#endif
 #define QF_WINHEIGHT	10	/* default height for quickfix window */
 
 /*
@@ -1824,11 +1805,13 @@ typedef int sock_T;
 
 /* Include option.h before structs.h, because the number of window-local and
  * buffer-local options is used there. */
-#include "option.h"	    /* options and default values */
+#include "option.h"	/* options and default values */
+
+#include "beval.h"	/* BalloonEval */
 
 /* Note that gui.h is included by structs.h */
 
-#include "structs.h"	    /* file that defines many structures */
+#include "structs.h"	/* defines many structures */
 
 #include "alloc.h"
 
@@ -1998,11 +1981,12 @@ typedef int sock_T;
 #define VV_TYPE_NONE	78
 #define VV_TYPE_JOB	79
 #define VV_TYPE_CHANNEL	80
-#define VV_TERMRGBRESP	81
-#define VV_TERMU7RESP	82
-#define VV_TERMSTYLERESP 83
-#define VV_TERMBLINKRESP 84
-#define VV_LEN		85	/* number of v: vars */
+#define VV_TERMRFGRESP	81
+#define VV_TERMRBGRESP	82
+#define VV_TERMU7RESP	83
+#define VV_TERMSTYLERESP 84
+#define VV_TERMBLINKRESP 85
+#define VV_LEN		86	/* number of v: vars */
 
 /* used for v_number in VAR_SPECIAL */
 #define VVAL_FALSE	0L
@@ -2355,9 +2339,10 @@ typedef enum {
 # ifdef instr
 #  undef instr
 # endif
-  /* bool may cause trouble on MACOS but is required on a few other systems
-   * and for Perl */
-# if defined(bool) && defined(MACOS) && !defined(FEAT_PERL)
+  /* bool may cause trouble on some old versions of Mac OS X but is required
+   * on a few other systems and for Perl */
+# if (defined(MACOS_X) && !defined(MAC_OS_X_VERSION_10_6)) \
+				       && defined(bool) && !defined(FEAT_PERL)
 #  undef bool
 # endif
 
@@ -2500,7 +2485,8 @@ typedef enum {
 #define FNE_INCL_BR	1	/* include [] in name */
 #define FNE_CHECK_START	2	/* check name starts with valid character */
 
-#if (defined(SUN_SYSTEM) || defined(__FreeBSD__) || defined(__FreeBSD_kernel__)) \
+/* BSD is supposed to cover FreeBSD and similar systems. */
+#if (defined(SUN_SYSTEM) || defined(BSD) || defined(__FreeBSD_kernel__)) \
 	&& defined(S_ISCHR)
 # define OPEN_CHR_FILES
 #endif

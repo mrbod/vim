@@ -4,8 +4,6 @@
 #
 # Author: Bill McCarthy
 #
-# Note that test54 has been removed until it is fixed.
-#
 # Requires a set of Unix tools: echo, diff, etc.
 
 ifneq (sh.exe, $(SHELL))
@@ -33,9 +31,6 @@ include Make_all.mak
 # Omitted:
 # test2		"\\tmp" doesn't work.
 # test10	'errorformat' is different
-# test12	can't unlink a swap file
-# test25	uses symbolic link
-# test54	doesn't work yet
 # test97	\{ and \$ are not escaped characters
 
 SCRIPTS = $(SCRIPTS_ALL) $(SCRIPTS_MORE1) $(SCRIPTS_MORE4) $(SCRIPTS_WIN32)
@@ -68,8 +63,7 @@ win32:	fixff nolog $(SCRIPTS_FIRST) $(SCRIPTS) $(SCRIPTS_WIN32) newtests
 fixff:
 	-$(VIMPROG) -u dos.vim $(NO_INITS) "+argdo set ff=dos|upd" +q *.in *.ok
 	-$(VIMPROG) -u dos.vim $(NO_INITS) "+argdo set ff=unix|upd" +q \
-		dotest.in test60.ok test_listchars.ok \
-		test_wordcount.ok
+		dotest.in test_wordcount.ok
 
 clean:
 	-@if exist *.out $(DEL) *.out

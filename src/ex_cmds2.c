@@ -131,6 +131,7 @@ do_debug(char_u *cmd)
     redir_off = TRUE;		/* don't redirect debug commands */
 
     State = NORMAL;
+    debug_mode = TRUE;
 
     if (!debug_did_msg)
 	MSG(_("Entering Debug mode.  Type \"cont\" to continue."));
@@ -319,6 +320,7 @@ do_debug(char_u *cmd)
     msg_scroll = save_msg_scroll;
     lines_left = Rows - 1;
     State = save_State;
+    debug_mode = FALSE;
     did_emsg = save_did_emsg;
     cmd_silent = save_cmd_silent;
     msg_silent = save_msg_silent;
@@ -1091,21 +1093,21 @@ static timer_T	*first_timer = NULL;
 static long	last_timer_id = 0;
 
     static long
-timer_time_left(timer_T *timer, proftime_T *now)
+proftime_time_left(proftime_T *due, proftime_T *now)
 {
 #  ifdef WIN3264
     LARGE_INTEGER fr;
 
-    if (now->QuadPart > timer->tr_due.QuadPart)
+    if (now->QuadPart > due->QuadPart)
 	return 0;
     QueryPerformanceFrequency(&fr);
-    return (long)(((double)(timer->tr_due.QuadPart - now->QuadPart)
+    return (long)(((double)(due->QuadPart - now->QuadPart)
 		   / (double)fr.QuadPart) * 1000);
 #  else
-    if (now->tv_sec > timer->tr_due.tv_sec)
+    if (now->tv_sec > due->tv_sec)
 	return 0;
-    return (timer->tr_due.tv_sec - now->tv_sec) * 1000
-	+ (timer->tr_due.tv_usec - now->tv_usec) / 1000;
+    return (due->tv_sec - now->tv_sec) * 1000
+	+ (due->tv_usec - now->tv_usec) / 1000;
 #  endif
 }
 
@@ -1217,7 +1219,7 @@ check_due_timer(void)
 
 	if (timer->tr_id == -1 || timer->tr_firing || timer->tr_paused)
 	    continue;
-	this_due = timer_time_left(timer, &now);
+	this_due = proftime_time_left(&timer->tr_due, &now);
 	if (this_due <= 1)
 	{
 	    int save_timer_busy = timer_busy;
@@ -1269,7 +1271,7 @@ check_due_timer(void)
 		    && timer->tr_emsg_count < 3)
 	    {
 		profile_setlimit(timer->tr_interval, &timer->tr_due);
-		this_due = timer_time_left(timer, &now);
+		this_due = proftime_time_left(&timer->tr_due, &now);
 		if (this_due < 1)
 		    this_due = 1;
 		if (timer->tr_repeat > 0)
@@ -1288,6 +1290,27 @@ check_due_timer(void)
 
     if (did_one)
 	redraw_after_callback(need_update_screen);
+
+#ifdef FEAT_BEVAL_TERM
+    if (bevalexpr_due_set)
+    {
+	this_due = proftime_time_left(&bevalexpr_due, &now);
+	if (this_due <= 1)
+	{
+	    bevalexpr_due_set = FALSE;
+
+	    if (balloonEval == NULL)
+	    {
+		balloonEval = (BalloonEval *)alloc(sizeof(BalloonEval));
+		balloonEvalForTerm = TRUE;
+	    }
+	    if (balloonEval != NULL)
+		general_beval_cb(balloonEval, 0);
+	}
+	else if (this_due > 0 && (next_due == -1 || next_due > this_due))
+	    next_due = this_due;
+    }
+#endif
 
     return current_id != last_timer_id ? 1 : next_due;
 }
@@ -1356,7 +1379,7 @@ add_timer_info(typval_T *rettv, timer_T *timer)
     dict_add_nr_str(dict, "time", (long)timer->tr_interval, NULL);
 
     profile_start(&now);
-    remaining = timer_time_left(timer, &now);
+    remaining = proftime_time_left(&timer->tr_due, &now);
     dict_add_nr_str(dict, "remaining", (long)remaining, NULL);
 
     dict_add_nr_str(dict, "repeat",
@@ -1714,7 +1737,7 @@ script_do_profile(scriptitem_T *si)
 }
 
 /*
- * save time when starting to invoke another script or function.
+ * Save time when starting to invoke another script or function.
  */
     void
 script_prof_save(
@@ -1805,12 +1828,14 @@ script_dump_profile(FILE *fd)
 		fprintf(fd, "Cannot open file!\n");
 	    else
 	    {
-		for (i = 0; i < si->sn_prl_ga.ga_len; ++i)
+		/* Keep going till the end of file, so that trailing
+		 * continuation lines are listed. */
+		for (i = 0; ; ++i)
 		{
 		    if (vim_fgets(IObuff, IOSIZE, sfd))
 			break;
-		    pp = &PRL_ITEM(si, i);
-		    if (pp->snp_count > 0)
+		    if (i < si->sn_prl_ga.ga_len
+				     && (pp = &PRL_ITEM(si, i))->snp_count > 0)
 		    {
 			fprintf(fd, "%5d ", pp->snp_count);
 			if (profile_equal(&pp->sn_prl_total, &pp->sn_prl_self))
@@ -4234,27 +4259,6 @@ do_source(
     save_sourcing_lnum = sourcing_lnum;
     sourcing_lnum = 0;
 
-#ifdef FEAT_MBYTE
-    cookie.conv.vc_type = CONV_NONE;		/* no conversion */
-
-    /* Read the first line so we can check for a UTF-8 BOM. */
-    firstline = getsourceline(0, (void *)&cookie, 0);
-    if (firstline != NULL && STRLEN(firstline) >= 3 && firstline[0] == 0xef
-			      && firstline[1] == 0xbb && firstline[2] == 0xbf)
-    {
-	/* Found BOM; setup conversion, skip over BOM and recode the line. */
-	convert_setup(&cookie.conv, (char_u *)"utf-8", p_enc);
-	p = string_convert(&cookie.conv, firstline + 3, NULL);
-	if (p == NULL)
-	    p = vim_strsave(firstline + 3);
-	if (p != NULL)
-	{
-	    vim_free(firstline);
-	    firstline = p;
-	}
-    }
-#endif
-
 #ifdef STARTUPTIME
     if (time_fd != NULL)
 	time_push(&tv_rel, &tv_start);
@@ -4345,6 +4349,27 @@ do_source(
 	}
     }
 # endif
+#endif
+
+#ifdef FEAT_MBYTE
+    cookie.conv.vc_type = CONV_NONE;		/* no conversion */
+
+    /* Read the first line so we can check for a UTF-8 BOM. */
+    firstline = getsourceline(0, (void *)&cookie, 0);
+    if (firstline != NULL && STRLEN(firstline) >= 3 && firstline[0] == 0xef
+			      && firstline[1] == 0xbb && firstline[2] == 0xbf)
+    {
+	/* Found BOM; setup conversion, skip over BOM and recode the line. */
+	convert_setup(&cookie.conv, (char_u *)"utf-8", p_enc);
+	p = string_convert(&cookie.conv, firstline + 3, NULL);
+	if (p == NULL)
+	    p = vim_strsave(firstline + 3);
+	if (p != NULL)
+	{
+	    vim_free(firstline);
+	    firstline = p;
+	}
+    }
 #endif
 
     /*
@@ -4829,7 +4854,8 @@ script_line_start(void)
     {
 	/* Grow the array before starting the timer, so that the time spent
 	 * here isn't counted. */
-	(void)ga_grow(&si->sn_prl_ga, (int)(sourcing_lnum - si->sn_prl_ga.ga_len));
+	(void)ga_grow(&si->sn_prl_ga,
+				  (int)(sourcing_lnum - si->sn_prl_ga.ga_len));
 	si->sn_prl_idx = sourcing_lnum - 1;
 	while (si->sn_prl_ga.ga_len <= si->sn_prl_idx
 		&& si->sn_prl_ga.ga_len < si->sn_prl_ga.ga_maxlen)
@@ -4864,7 +4890,7 @@ script_line_exec(void)
 }
 
 /*
- * Called when done with a function line.
+ * Called when done with a script line.
  */
     void
 script_line_end(void)

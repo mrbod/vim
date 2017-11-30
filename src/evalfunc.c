@@ -24,7 +24,7 @@
 # include <float.h>
 #endif
 
-#ifdef MACOS
+#ifdef MACOS_X
 # include <time.h>	/* for time_t */
 #endif
 
@@ -61,6 +61,9 @@ static void f_atan2(typval_T *argvars, typval_T *rettv);
 #endif
 #ifdef FEAT_BEVAL
 static void f_balloon_show(typval_T *argvars, typval_T *rettv);
+# if defined(FEAT_BEVAL_TERM)
+static void f_balloon_split(typval_T *argvars, typval_T *rettv);
+# endif
 #endif
 static void f_browse(typval_T *argvars, typval_T *rettv);
 static void f_browsedir(typval_T *argvars, typval_T *rettv);
@@ -494,6 +497,9 @@ static struct fst
 #endif
 #ifdef FEAT_BEVAL
     {"balloon_show",	1, 1, f_balloon_show},
+# if defined(FEAT_BEVAL_TERM)
+    {"balloon_split",	1, 1, f_balloon_split},
+# endif
 #endif
     {"browse",		4, 4, f_browse},
     {"browsedir",	2, 2, f_browsedir},
@@ -1410,8 +1416,40 @@ f_atan2(typval_T *argvars, typval_T *rettv)
 f_balloon_show(typval_T *argvars, typval_T *rettv UNUSED)
 {
     if (balloonEval != NULL)
-	gui_mch_post_balloon(balloonEval, get_tv_string_chk(&argvars[0]));
+    {
+	if (argvars[0].v_type == VAR_LIST
+# ifdef FEAT_GUI
+		&& !gui.in_use
+# endif
+	   )
+	    post_balloon(balloonEval, NULL, argvars[0].vval.v_list);
+	else
+	    post_balloon(balloonEval, get_tv_string_chk(&argvars[0]), NULL);
+    }
 }
+
+# if defined(FEAT_BEVAL_TERM)
+    static void
+f_balloon_split(typval_T *argvars, typval_T *rettv UNUSED)
+{
+    if (rettv_list_alloc(rettv) == OK)
+    {
+	char_u *msg = get_tv_string_chk(&argvars[0]);
+
+	if (msg != NULL)
+	{
+	    pumitem_T	*array;
+	    int		size = split_message(msg, &array);
+	    int		i;
+
+	    /* Skip the first and last item, they are always empty. */
+	    for (i = 1; i < size - 1; ++i)
+		list_append_string(rettv->vval.v_list, array[i].pum_text, -1);
+	    vim_free(array);
+	}
+    }
+}
+# endif
 #endif
 
 /*
@@ -5539,14 +5577,13 @@ f_has(typval_T *argvars, typval_T *rettv)
 #ifdef __BEOS__
 	"beos",
 #endif
-#ifdef MACOS
-	"mac",
-#endif
-#if defined(MACOS_X_UNIX)
-	"macunix",  /* built with 'darwin' enabled */
-#endif
-#if defined(__APPLE__) && __APPLE__ == 1
-	"osx",	    /* built with or without 'darwin' enabled */
+#ifdef MACOS_X
+       "mac",		/* Mac OS X (and, once, Mac OS Classic) */
+       "osx",		/* Mac OS X */
+# ifdef MACOS_X_DARWIN
+       "macunix",	/* Mac OS X, with the darwin feature */
+       "osxdarwin",	/* synonym for macunix */
+# endif
 #endif
 #ifdef __QNX__
 	"qnx",
@@ -5581,11 +5618,17 @@ f_has(typval_T *argvars, typval_T *rettv)
 #ifdef FEAT_AUTOCMD
 	"autocmd",
 #endif
-#ifdef FEAT_BEVAL
+#ifdef FEAT_AUTOSERVERNAME
+	"autoservername",
+#endif
+#ifdef FEAT_BEVAL_GUI
 	"balloon_eval",
 # ifndef FEAT_GUI_W32 /* other GUIs always have multiline balloons */
 	"balloon_multiline",
 # endif
+#endif
+#ifdef FEAT_BEVAL_TERM
+	"balloon_eval_term",
 #endif
 #if defined(SOME_BUILTIN_TCAPS) || defined(ALL_BUILTIN_TCAPS)
 	"builtin_terms",
@@ -9532,13 +9575,12 @@ f_searchdecl(typval_T *argvars, typval_T *rettv)
 searchpair_cmn(typval_T *argvars, pos_T *match_pos)
 {
     char_u	*spat, *mpat, *epat;
-    char_u	*skip;
+    typval_T	*skip;
     int		save_p_ws = p_ws;
     int		dir;
     int		flags = 0;
     char_u	nbuf1[NUMBUFLEN];
     char_u	nbuf2[NUMBUFLEN];
-    char_u	nbuf3[NUMBUFLEN];
     int		retval = 0;		/* default: FAIL */
     long	lnum_stop = 0;
     long	time_limit = 0;
@@ -9572,10 +9614,16 @@ searchpair_cmn(typval_T *argvars, pos_T *match_pos)
     /* Optional fifth argument: skip expression */
     if (argvars[3].v_type == VAR_UNKNOWN
 	    || argvars[4].v_type == VAR_UNKNOWN)
-	skip = (char_u *)"";
+	skip = NULL;
     else
     {
-	skip = get_tv_string_buf_chk(&argvars[4], nbuf3);
+	skip = &argvars[4];
+	if (skip->v_type != VAR_FUNC && skip->v_type != VAR_PARTIAL
+	    && skip->v_type != VAR_STRING)
+	{
+	    /* Type error */
+	    goto theend;
+	}
 	if (argvars[5].v_type != VAR_UNKNOWN)
 	{
 	    lnum_stop = (long)get_tv_number_chk(&argvars[5], NULL);
@@ -9591,8 +9639,6 @@ searchpair_cmn(typval_T *argvars, pos_T *match_pos)
 #endif
 	}
     }
-    if (skip == NULL)
-	goto theend;	    /* type error */
 
     retval = do_searchpair(spat, mpat, epat, dir, skip, flags,
 					    match_pos, lnum_stop, time_limit);
@@ -9646,7 +9692,7 @@ do_searchpair(
     char_u	*mpat,	    /* middle pattern */
     char_u	*epat,	    /* end pattern */
     int		dir,	    /* BACKWARD or FORWARD */
-    char_u	*skip,	    /* skip expression */
+    typval_T	*skip,	    /* skip expression */
     int		flags,	    /* SP_SETPCMARK and other SP_ values */
     pos_T	*match_pos,
     linenr_T	lnum_stop,  /* stop at this line if not zero */
@@ -9663,6 +9709,7 @@ do_searchpair(
     int		n;
     int		r;
     int		nest = 1;
+    int		use_skip = FALSE;
     int		err;
     int		options = SEARCH_KEEP;
     proftime_T	tm;
@@ -9690,6 +9737,14 @@ do_searchpair(
 							    spat, epat, mpat);
     if (flags & SP_START)
 	options |= SEARCH_START;
+
+    if (skip != NULL)
+    {
+	/* Empty string means to not use the skip expression. */
+	if (skip->v_type == VAR_STRING || skip->v_type == VAR_FUNC)
+	    use_skip = skip->vval.v_string != NULL
+						&& *skip->vval.v_string != NUL;
+    }
 
     save_cursor = curwin->w_cursor;
     pos = curwin->w_cursor;
@@ -9722,11 +9777,12 @@ do_searchpair(
 	options &= ~SEARCH_START;
 
 	/* If the skip pattern matches, ignore this match. */
-	if (*skip != NUL)
+	if (use_skip)
 	{
 	    save_pos = curwin->w_cursor;
 	    curwin->w_cursor = pos;
-	    r = eval_to_bool(skip, &err, NULL, FALSE);
+	    err = FALSE;
+	    r = eval_expr_to_bool(skip, &err);
 	    curwin->w_cursor = save_pos;
 	    if (err)
 	    {
@@ -9879,7 +9935,8 @@ set_buffer_lines(buf_T *buf, linenr_T lnum, typval_T *lines, typval_T *rettv)
     listitem_T	*li = NULL;
     long	added = 0;
     linenr_T	lcount;
-    buf_T	*curbuf_save;
+    buf_T	*curbuf_save = NULL;
+    win_T	*curwin_save = NULL;
     int		is_curbuf = buf == curbuf;
 
     /* When using the current buffer ml_mfp will be set if needed.  Useful when
@@ -9891,8 +9948,22 @@ set_buffer_lines(buf_T *buf, linenr_T lnum, typval_T *lines, typval_T *rettv)
 	return;
     }
 
-    curbuf_save = curbuf;
-    curbuf = buf;
+    if (!is_curbuf)
+    {
+	wininfo_T *wip;
+
+	curbuf_save = curbuf;
+	curwin_save = curwin;
+	curbuf = buf;
+	for (wip = buf->b_wininfo; wip != NULL; wip = wip->wi_next)
+	{
+	    if (wip->wi_win != NULL)
+	    {
+		curwin = wip->wi_win;
+		break;
+	    }
+	}
+    }
 
     lcount = curbuf->b_ml.ml_line_count;
 
@@ -9955,7 +10026,11 @@ set_buffer_lines(buf_T *buf, linenr_T lnum, typval_T *lines, typval_T *rettv)
     if (added > 0)
 	appended_lines_mark(lcount, added);
 
-    curbuf = curbuf_save;
+    if (!is_curbuf)
+    {
+	curbuf = curbuf_save;
+	curwin = curwin_save;
+    }
 }
 
 /*
@@ -13314,6 +13389,9 @@ f_writefile(typval_T *argvars, typval_T *rettv)
 {
     int		binary = FALSE;
     int		append = FALSE;
+#ifdef HAVE_FSYNC
+    int		do_fsync = p_fs;
+#endif
     char_u	*fname;
     FILE	*fd;
     int		ret = 0;
@@ -13346,6 +13424,12 @@ f_writefile(typval_T *argvars, typval_T *rettv)
 	    binary = TRUE;
 	if (vim_strchr(arg2, 'a') != NULL)
 	    append = TRUE;
+#ifdef HAVE_FSYNC
+	if (vim_strchr(arg2, 's') != NULL)
+	    do_fsync = TRUE;
+	else if (vim_strchr(arg2, 'S') != NULL)
+	    do_fsync = FALSE;
+#endif
     }
 
     fname = get_tv_string_chk(&argvars[1]);
@@ -13364,6 +13448,12 @@ f_writefile(typval_T *argvars, typval_T *rettv)
     {
 	if (write_list(fd, list, binary) == FAIL)
 	    ret = -1;
+#ifdef HAVE_FSYNC
+	else if (do_fsync)
+	    /* Ignore the error, the user wouldn't know what to do about it.
+	     * May happen for a device. */
+	    ignored = fsync(fileno(fd));
+#endif
 	fclose(fd);
     }
 

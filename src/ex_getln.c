@@ -145,6 +145,33 @@ sort_func_compare(const void *s1, const void *s2);
 static void set_search_match(pos_T *t);
 #endif
 
+
+#ifdef FEAT_AUTOCMD
+    static void
+trigger_cmd_autocmd(int typechar, int evt)
+{
+    char_u	typestr[2];
+
+    typestr[0] = typechar;
+    typestr[1] = NUL;
+    apply_autocmds(evt, typestr, typestr, FALSE, curbuf);
+}
+#endif
+
+/*
+ * Abandon the command line.
+ */
+    static void
+abandon_cmdline(void)
+{
+    vim_free(ccline.cmdbuff);
+    ccline.cmdbuff = NULL;
+    if (msg_scrolled == 0)
+	compute_cmdrow();
+    MSG("");
+    redraw_cmdline = TRUE;
+}
+
 /*
  * getcmdline() - accept a command line starting with firstc.
  *
@@ -193,7 +220,7 @@ getcmdline(
     pos_T       match_end;
 # ifdef FEAT_DIFF
     int		old_topfill;
-    int         init_topfill = curwin->w_topfill;
+    int		init_topfill = curwin->w_topfill;
 # endif
     linenr_T	old_botline;
     linenr_T	init_botline = curwin->w_botline;
@@ -221,6 +248,9 @@ getcmdline(
      * current command line in save_ccline.  That includes update_screen(), a
      * custom status line may invoke ":normal". */
     struct cmdline_info save_ccline;
+#endif
+#ifdef FEAT_AUTOCMD
+    int		cmdline_type;
 #endif
 
 #ifdef FEAT_EVAL
@@ -329,11 +359,11 @@ getcmdline(
 	    b_im_ptr = &curbuf->b_p_imsearch;
 	if (*b_im_ptr == B_IMODE_LMAP)
 	    State |= LANGMAP;
-#ifdef USE_IM_CONTROL
+#ifdef FEAT_MBYTE
 	im_set_active(*b_im_ptr == B_IMODE_IM);
 #endif
     }
-#ifdef USE_IM_CONTROL
+#ifdef FEAT_MBYTE
     else if (p_imcmdline)
 	im_set_active(TRUE);
 #endif
@@ -348,6 +378,12 @@ getcmdline(
     /* When inside an autocommand for writing "exiting" may be set and
      * terminal mode set to cooked.  Need to set raw mode here then. */
     settmode(TMODE_RAW);
+
+#ifdef FEAT_AUTOCMD
+    /* Trigger CmdlineEnter autocommands. */
+    cmdline_type = firstc == NUL ? '-' : firstc;
+    trigger_cmd_autocmd(cmdline_type, EVENT_CMDLINEENTER);
+#endif
 
 #ifdef FEAT_CMDHIST
     init_history();
@@ -381,12 +417,12 @@ getcmdline(
 
 	cursorcmd();		/* set the cursor on the right spot */
 
-	/* Get a character.  Ignore K_IGNORE, it should not do anything, such
-	 * as stop completion. */
+	/* Get a character.  Ignore K_IGNORE and K_NOP, they should not do
+	 * anything, such as stop completion. */
 	do
 	{
 	    c = safe_vgetc();
-	} while (c == K_IGNORE);
+	} while (c == K_IGNORE || c == K_NOP);
 
 	if (KeyTyped)
 	{
@@ -1083,7 +1119,7 @@ getcmdline(
 		{
 		    /* ":lmap" mappings exists, toggle use of mappings. */
 		    State ^= LANGMAP;
-#ifdef USE_IM_CONTROL
+#ifdef FEAT_MBYTE
 		    im_set_active(FALSE);	/* Disable input method */
 #endif
 		    if (b_im_ptr != NULL)
@@ -1094,7 +1130,7 @@ getcmdline(
 			    *b_im_ptr = B_IMODE_NONE;
 		    }
 		}
-#ifdef USE_IM_CONTROL
+#ifdef FEAT_MBYTE
 		else
 		{
 		    /* There are no ":lmap" mappings, toggle IM.  When
@@ -1416,6 +1452,7 @@ getcmdline(
 	case K_X2MOUSE:
 	case K_X2DRAG:
 	case K_X2RELEASE:
+	case K_MOUSEMOVE:
 		goto cmdline_not_changed;
 
 #endif	/* FEAT_MOUSE */
@@ -1527,9 +1564,8 @@ getcmdline(
 			break;
 		    goto cmdline_not_changed;
 		}
-		/* FALLTHROUGH */
-
 #ifdef FEAT_CMDHIST
+		/* FALLTHROUGH */
 	case K_UP:
 	case K_DOWN:
 	case K_S_UP:
@@ -1680,24 +1716,37 @@ getcmdline(
 		if (p_is && !cmd_silent && (firstc == '/' || firstc == '?'))
 		{
 		    pos_T  t;
-		    int    search_flags = SEARCH_KEEP + SEARCH_NOOF
-							     + SEARCH_PEEK;
+		    char_u *pat;
+		    int    search_flags = SEARCH_NOOF;
 
-		    if (char_avail())
-			continue;
+		    if (ccline.cmdlen == 0)
+			goto cmdline_not_changed;
+
+		    if (firstc == ccline.cmdbuff[0])
+			pat = last_search_pattern();
+		    else
+			pat = ccline.cmdbuff;
+
+		    save_last_search_pattern();
 		    cursor_off();
 		    out_flush();
 		    if (c == Ctrl_G)
 		    {
 			t = match_end;
+			if (LT_POS(match_start, match_end))
+			    /* start searching at the end of the match
+			     * not at the beginning of the next column */
+			    (void)decl(&t);
 			search_flags += SEARCH_COL;
 		    }
 		    else
 			t = match_start;
+		    if (!p_hls)
+			search_flags += SEARCH_KEEP;
 		    ++emsg_off;
 		    i = searchit(curwin, curbuf, &t,
 				 c == Ctrl_G ? FORWARD : BACKWARD,
-				 ccline.cmdbuff, count, search_flags,
+				 pat, count, search_flags,
 				 RE_SEARCH, 0, NULL, NULL);
 		    --emsg_off;
 		    if (i)
@@ -1745,6 +1794,7 @@ getcmdline(
 # endif
 			old_botline = curwin->w_botline;
 			update_screen(NOT_VALID);
+			restore_last_search_pattern();
 			redrawcmdline();
 		    }
 		    else
@@ -1902,12 +1952,18 @@ cmdline_changed:
 	    }
 	    incsearch_postponed = FALSE;
 	    curwin->w_cursor = search_start;  /* start at old position */
+	    save_last_search_pattern();
 
 	    /* If there is no command line, don't do anything */
 	    if (ccline.cmdlen == 0)
+	    {
 		i = 0;
+		SET_NO_HLSEARCH(TRUE); /* turn off previous highlight */
+		redraw_all_later(SOME_VALID);
+	    }
 	    else
 	    {
+		int search_flags = SEARCH_OPT + SEARCH_NOOF + SEARCH_PEEK;
 		cursor_off();		/* so the user knows we're busy */
 		out_flush();
 		++emsg_off;    /* So it doesn't beep if bad expr */
@@ -1915,8 +1971,10 @@ cmdline_changed:
 		/* Set the time limit to half a second. */
 		profile_setlimit(500L, &tm);
 #endif
+		if (!p_hls)
+		    search_flags += SEARCH_KEEP;
 		i = do_search(NULL, firstc, ccline.cmdbuff, count,
-			SEARCH_KEEP + SEARCH_OPT + SEARCH_NOOF + SEARCH_PEEK,
+			search_flags,
 #ifdef FEAT_RELTIME
 			&tm, NULL
 #else
@@ -1973,6 +2031,7 @@ cmdline_changed:
 	    save_cmdline(&save_ccline);
 	    update_screen(SOME_VALID);
 	    restore_cmdline(&save_ccline);
+	    restore_last_search_pattern();
 
 	    /* Leave it at the end to make CTRL-R CTRL-W work. */
 	    if (i != 0)
@@ -2038,7 +2097,7 @@ returncmd:
 	curwin->w_botline = old_botline;
 	highlight_match = FALSE;
 	validate_cursor();	/* needed for TAB */
-	redraw_later(SOME_VALID);
+	redraw_all_later(SOME_VALID);
     }
 #endif
 
@@ -2061,15 +2120,8 @@ returncmd:
 	}
 #endif
 
-	if (gotesc)	    /* abandon command line */
-	{
-	    vim_free(ccline.cmdbuff);
-	    ccline.cmdbuff = NULL;
-	    if (msg_scrolled == 0)
-		compute_cmdrow();
-	    MSG("");
-	    redraw_cmdline = TRUE;
-	}
+	if (gotesc)
+	    abandon_cmdline();
     }
 
     /*
@@ -2085,8 +2137,13 @@ returncmd:
     if (some_key_typed)
 	need_wait_return = FALSE;
 
+#ifdef FEAT_AUTOCMD
+    /* Trigger CmdlineLeave autocommands. */
+    trigger_cmd_autocmd(cmdline_type, EVENT_CMDLINELEAVE);
+#endif
+
     State = save_State;
-#ifdef USE_IM_CONTROL
+#ifdef FEAT_MBYTE
     if (b_im_ptr != NULL && *b_im_ptr != B_IMODE_LMAP)
 	im_save_status(b_im_ptr);
     im_set_active(FALSE);
@@ -6834,9 +6891,6 @@ open_cmdwin(void)
     linenr_T		lnum;
     int			histtype;
     garray_T		winsizes;
-#ifdef FEAT_AUTOCMD
-    char_u		typestr[2];
-#endif
     int			save_restart_edit = restart_edit;
     int			save_State = State;
     int			save_exmode = exmode_active;
@@ -6965,9 +7019,7 @@ open_cmdwin(void)
 
 # ifdef FEAT_AUTOCMD
     /* Trigger CmdwinEnter autocommands. */
-    typestr[0] = cmdwin_type;
-    typestr[1] = NUL;
-    apply_autocmds(EVENT_CMDWINENTER, typestr, typestr, FALSE, curbuf);
+    trigger_cmd_autocmd(cmdwin_type, EVENT_CMDWINENTER);
     if (restart_edit != 0)	/* autocmd with ":startinsert" */
 	stuffcharReadbuff(K_NOP);
 # endif
@@ -6990,7 +7042,7 @@ open_cmdwin(void)
 #  endif
 
     /* Trigger CmdwinLeave autocommands. */
-    apply_autocmds(EVENT_CMDWINLEAVE, typestr, typestr, FALSE, curbuf);
+    trigger_cmd_autocmd(cmdwin_type, EVENT_CMDWINLEAVE);
 
 #  ifdef FEAT_FOLDING
     /* Restore KeyTyped in case it is modified by autocommands */
